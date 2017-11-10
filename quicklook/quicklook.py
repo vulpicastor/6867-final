@@ -3,7 +3,6 @@
 from astropy import table
 from astropy.io import fits, ascii
 import logging
-import numpy as np
 from os import path
 import sys
 
