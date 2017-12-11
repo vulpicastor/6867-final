@@ -5,6 +5,7 @@ from astropy.io import fits, ascii
 import logging
 from os import path
 import sys
+import traceback
 
 import injection
 
@@ -75,17 +76,24 @@ def gather_data(filename, injected_table, injected_table_index):
     return t
 
 def main():
+    logging.warning("Making sure that warning shots are fired")
     # Load the injected transits data table.
     injected = injection.parse_injected_table("/mnt/data/meta/kplr_dr25_inj1_plti.txt")
     index = injection.index_injected_table(injected)
     # Iterate through all filenames given as command line arguments.
     for i in sys.argv[1:]:
-        filename = path.abspath(i)
-        # Example of an okay light curve:
-        # "/mnt/data/INJ1/kplr011183555-2011271113734_INJECTED-inj1_llc.fits.gz"
-        t = gather_data(filename, injected, index)
-        root = path.basename(filename).split(".")[0]
-        ascii.write(t, root + "_quicklook.ecsv", format='ecsv')
+        logging.info("Processing %s", i)
+        try:
+            filename = path.abspath(i)
+            # Example of an okay light curve:
+            # "/mnt/data/INJ1/kplr011183555-2011271113734_INJECTED-inj1_llc.fits.gz"
+            t = gather_data(filename, injected, index)
+            root = path.basename(filename).split(".")[0]
+            ascii.write(t, root + "_quicklook.ecsv", format='ecsv')
+        except Exception as e:
+            logging.error("Error while processing file %s: %s", i, e)
+            logging.error("Traceback: %s", traceback.format_exc())
 
 if __name__ == "__main__":
+    logging.basicConfig(filename="output.log", level=logging.INFO)
     main()
