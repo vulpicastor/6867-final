@@ -9,7 +9,7 @@ import traceback
 
 import injection
 
-BOUND_TOL = 1. / 24  # day; this is equivalent to two long cadences.
+BOUND_TOL = 6. / 24  # day; this is equivalent to 12 long cadences.
 
 def dictify(fits_header):
     """-> dictionary representation of the FITS header.
@@ -35,11 +35,11 @@ def find_time_range(fits_table_header, injected_row):
     num_period = (t_start - epoch) // period + 1  # VERY IMPORTANT OFF BY ONE.
     # Calculate the start and stop times of the transit.
     mid_transit = epoch + period * num_period  # Time of mid-transit
-    half_width = dur / 2 + BOUND_TOL  # Include an extra hour (2 long cadences)
+    half_width = dur / 2 + BOUND_TOL  # Include an extra hour (12 long cadences)
     start = mid_transit - half_width
     stop = mid_transit + half_width
     logging.info("The start and stop period for {} is {}, {}".format(fits_table_header["OBJECT"], start, stop))
-    return start, stop
+    return start, stop, mid_transit, dur
 
 def strip_rows(fits_table, t_start, t_stop):
     rows = []
@@ -47,18 +47,22 @@ def strip_rows(fits_table, t_start, t_stop):
     # Make sure that the given start and stop times are actually within bounds
     # of the light curve.
     if header["TSTART"] >= t_start or header["TSTOP"] <= t_stop:  # Assumes that table is sorted by time.
-        logging.warning("t_start or t_stop out of light curve bounds")
+        logging.warning("t_start or t_stop outside of light curve bounds!")
     for r in data:
         if t_start <= r["TIME"] and r["TIME"] <= t_stop:
             rows.append(r)
     return rows
 
-def strip_cols(fits_rows, metadata):
+def strip_cols(fits_rows, metadata, mid_transit, dur):
     data_rows = []
+    start = mid_transit - dur / 2
+    stop = mid_transit + dur / 2
     for r in fits_rows:
-        data_rows.append((r["TIME"], r["SAP_FLUX"]))
-    t = table.Table(rows=data_rows, names=("TIME", "SAP_FLUX"),
-        dtype=("f8", "f8"), meta=metadata)
+        # in_transit is 0 if outside transit and 1 if inside transit.
+        in_transit = int((start <= r["TIME"]) and (r["TIME"] <= stop))
+        data_rows.append((r["TIME"], r["SAP_FLUX"], in_transit))
+    t = table.Table(rows=data_rows, names=("TIME", "SAP_FLUX", "IN_TRANSIT"),
+        dtype=("f8", "f8", "i4"), meta=metadata)
     return t
 
 def gather_data(filename, injected_table, injected_table_index):
@@ -68,11 +72,12 @@ def gather_data(filename, injected_table, injected_table_index):
         # Find corresponding row in the injected data table.
         injected_row = injected_table[injected_table_index[kic_id]]
         # Find when the transit starts and stops in the FITS file.
-        start, stop = find_time_range(hdulist[1].header, injected_row)
+        start, stop, mid_transit, dur = find_time_range(hdulist[1].header, injected_row)
         # Strip out the rows that are actually transts.
         rows = strip_rows(hdulist[1], start, stop)
         # Only preserve the TIME and SAP_FLUX columns of the light curve.
-        t = strip_cols(rows, dictify(hdulist[1].header))
+        # Also add tag for whether the mid transit point has passed.
+        t = strip_cols(rows, dictify(hdulist[1].header), mid_transit, dur)
     return t
 
 def main():
