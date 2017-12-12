@@ -4,12 +4,15 @@ from astropy import table
 from astropy.io import fits, ascii
 import logging
 from os import path
+import random
 import sys
 import traceback
 
 import injection
 
 BOUND_TOL = 6. / 24  # day; this is equivalent to 12 long cadences.
+NEG_UPPER = 1.  # day; upper bound for time span of negative samples.
+NEG_LOWER = 1.5 / 24  # day; lower bound for time span of negative samples.
 
 def dictify(fits_header):
     """-> dictionary representation of the FITS header.
@@ -53,6 +56,25 @@ def strip_rows(fits_table, t_start, t_stop):
             rows.append(r)
     return rows
 
+def strip_rows_negative(fits_table, t_start, t_stop):
+    header, data = fits_table.header, fits_table.data
+    # t_start, t_stop = header["TSTART"], header["TSTOP"]
+    dur = random.uniform(NEG_LOWER, NEG_UPPER)  # Choose a duration for the negative sample
+    # Randomly find a start and stop time that does not overlap with interval
+    for i in range(100):
+        i_start = random.choice(data["TIME"])
+        i_stop = i_start + dur
+        if not (((t_start <= i_start) and (i_start <= t_stop)) or ((t_start <= i_stop) and (i_stop <= t_stop))):
+            break
+    else:
+        logging.error("Cannot find a negative sample!")
+        return None
+    rows = []
+    for r in data:
+        if i_start <= r["TIME"] and r["TIME"] <= i_stop:
+            rows.append(r)
+    return rows
+
 def strip_cols(fits_rows, metadata, mid_transit, dur):
     data_rows = []
     start = mid_transit - dur / 2
@@ -75,10 +97,16 @@ def gather_data(filename, injected_table, injected_table_index):
         start, stop, mid_transit, dur = find_time_range(hdulist[1].header, injected_row)
         # Strip out the rows that are actually transts.
         rows = strip_rows(hdulist[1], start, stop)
+        # Also generate the negative samples
+        neg_rows = strip_rows_negative(hdulist[1], start, stop)
         # Only preserve the TIME and SAP_FLUX columns of the light curve.
         # Also add tag for whether the mid transit point has passed.
         t = strip_cols(rows, dictify(hdulist[1].header), mid_transit, dur)
-    return t
+        if neg_rows is None:
+            neg_t = None
+        else:
+            neg_t = strip_cols(neg_rows, dictify(hdulist[1].header), mid_transit, dur)
+    return t, neg_t
 
 def main():
     logging.warning("Making sure that warning shots are fired")
@@ -92,9 +120,11 @@ def main():
             filename = path.abspath(i)
             # Example of an okay light curve:
             # "/mnt/data/INJ1/kplr011183555-2011271113734_INJECTED-inj1_llc.fits.gz"
-            t = gather_data(filename, injected, index)
+            t, neg_t = gather_data(filename, injected, index)
             root = path.basename(filename).split(".")[0]
             ascii.write(t, root + "_quicklook.ecsv", format='ecsv')
+            if neg_t is not None:
+                ascii.write(neg_t, root + "_quicklook_negative.ecsv", format='ecsv')
         except Exception as e:
             logging.error("Error while processing file %s: %s", i, e)
             logging.error("Traceback: %s", traceback.format_exc())
