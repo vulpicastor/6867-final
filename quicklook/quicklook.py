@@ -12,7 +12,7 @@ import injection
 
 BOUND_TOL = 6. / 24  # day; this is equivalent to 12 long cadences.
 NEG_UPPER = 1.  # day; upper bound for time span of negative samples.
-NEG_LOWER = 1.5 / 24  # day; lower bound for time span of negative samples.
+NEG_LOWER = 3 / 24  # day; lower bound for time span of negative samples.
 
 def dictify(fits_header):
     """-> dictionary representation of the FITS header.
@@ -75,16 +75,18 @@ def strip_rows_negative(fits_table, t_start, t_stop):
             rows.append(r)
     return rows
 
-def strip_cols(fits_rows, metadata, mid_transit, dur):
+def strip_cols(fits_rows, metadata, mid_transit, is_eb, dur):
     data_rows = []
     start = mid_transit - dur / 2
     stop = mid_transit + dur / 2
+    metadata["EB_injection"] = is_eb
     for r in fits_rows:
         # in_transit is 0 if outside transit and 1 if inside transit.
         in_transit = int((start <= r["TIME"]) and (r["TIME"] <= stop))
-        data_rows.append((r["TIME"], r["SAP_FLUX"], in_transit))
-    t = table.Table(rows=data_rows, names=("TIME", "SAP_FLUX", "IN_TRANSIT"),
-        dtype=("f8", "f8", "i4"), meta=metadata)
+        eb_injection = int(is_eb and in_transit)
+        data_rows.append((r["TIME"], r["SAP_FLUX"], in_transit, eb_injection))
+    t = table.Table(rows=data_rows, names=("TIME", "SAP_FLUX", "IN_TRANSIT", "EB_injection"),
+        dtype=("f8", "f8", "i4", "i4"), meta=metadata)
     return t
 
 def gather_data(filename, injected_table, injected_table_index):
@@ -99,19 +101,21 @@ def gather_data(filename, injected_table, injected_table_index):
         rows = strip_rows(hdulist[1], start, stop)
         # Also generate the negative samples
         neg_rows = strip_rows_negative(hdulist[1], start, stop)
+        # Extract information of whether an eclipsing binary is being simulated
+        is_eb = injected_row["EB_injection"]
         # Only preserve the TIME and SAP_FLUX columns of the light curve.
         # Also add tag for whether the mid transit point has passed.
-        t = strip_cols(rows, dictify(hdulist[1].header), mid_transit, dur)
-        if neg_rows is None:
+        t = strip_cols(rows, dictify(hdulist[1].header), mid_transit, is_eb, dur)
+        if neg_rows is None or is_eb:
             neg_t = None
         else:
-            neg_t = strip_cols(neg_rows, dictify(hdulist[1].header), mid_transit, dur)
+            neg_t = strip_cols(neg_rows, dictify(hdulist[1].header), mid_transit, 0, dur)
     return t, neg_t
 
 def main():
     logging.warning("Making sure that warning shots are fired")
     # Load the injected transits data table.
-    injected = injection.parse_injected_table("/mnt/data/meta/kplr_dr25_inj1_plti.txt")
+    injected = injection.parse_injected_table("/mnt/data/meta/kplr_dr25_inj3_plti.txt")
     index = injection.index_injected_table(injected)
     # Iterate through all filenames given as command line arguments.
     for i in sys.argv[1:]:
