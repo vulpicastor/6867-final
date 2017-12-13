@@ -11,8 +11,11 @@ import traceback
 import injection
 
 BOUND_TOL = 6. / 24  # day; this is equivalent to 12 long cadences.
+RANDOMIZE_BOUND = True
+BOUND_TOL_UPPER = 1.  # day
+BOUND_TOL_LOWER = 3./24  # day
 NEG_UPPER = 1.  # day; upper bound for time span of negative samples.
-NEG_LOWER = 3 / 24  # day; lower bound for time span of negative samples.
+NEG_LOWER = 3. / 24  # day; lower bound for time span of negative samples.
 
 def dictify(fits_header):
     """-> dictionary representation of the FITS header.
@@ -38,9 +41,16 @@ def find_time_range(fits_table_header, injected_row):
     num_period = (t_start - epoch) // period + 1  # VERY IMPORTANT OFF BY ONE.
     # Calculate the start and stop times of the transit.
     mid_transit = epoch + period * num_period  # Time of mid-transit
-    half_width = dur / 2 + BOUND_TOL  # Include an extra hour (12 long cadences)
-    start = mid_transit - half_width
-    stop = mid_transit + half_width
+    if RANDOMIZE_BOUND:
+        # For LSTM, padding should be randomized in order to prevent overfitting based on
+        # when the transit starts in the light curve.
+        half_width = dur / 2.
+        start = mid_transit - half_width - random.range(BOUND_TOL_LOWER, BOUND_TOL_UPPER)
+        stop = mid_transit + half_width + random.range(BOUND_TOL_LOWER, BOUND_TOL_UPPER)
+    else:
+        half_width = dur / 2. + BOUND_TOL  # Include an extra hour (12 long cadences)
+        start = mid_transit - half_width
+        stop = mid_transit + half_width
     logging.info("The start and stop period for {} is {}, {}".format(fits_table_header["OBJECT"], start, stop))
     return start, stop, mid_transit, dur
 
