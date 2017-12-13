@@ -18,7 +18,7 @@ import injection
 RANDOMIZE_BOUND = True
 BOUND_TOL = 6. / 24  # day; this is equivalent to 12 long cadences.
 BOUND_TOL_UPPER = 1.  # day
-BOUND_TOL_LOWER = 3./24  # day
+BOUND_TOL_LOWER = 2./24  # day
 NEG_UPPER = 2.  # day; upper bound for time span of negative samples.
 NEG_LOWER = 8. / 24  # day; lower bound for time span of negative samples.
 
@@ -48,6 +48,7 @@ def find_time_range(table_start, table_stop, epoch, period, dur, name="Unknown")
     logging.info("The transit start and stop period for %s is %s, %s", name, transit_start, transit_stop)
     if table_start >= transit_start or transit_stop >= table_stop:
         logging.error("Transit outside light curve range for %s!", name)
+        return None, None, None, None
     # Sanity checking.
     if RANDOMIZE_BOUND:
         # For LSTM, padding should be randomized in order to prevent overfitting based on
@@ -60,16 +61,11 @@ def find_time_range(table_start, table_stop, epoch, period, dur, name="Unknown")
         stop = transit_stop - BOUND_TOL
     # Check that transit is not clipped by data boundary
     if table_start >= start or stop >= table_stop:
-        logging.error("Transit too close to light curve broundary for %s!", name)
-        return None, None, None, None
+        logging.warning("Transit too close to light curve broundary for %s!", name)
     logging.info("The start and stop period for {} is {}, {}".format(name, start, stop))
     return start, stop, transit_start, transit_stop
 
 def strip_rows(time_col, time_start, time_stop, name="Unknown"):
-    # Sanity check: no time value is NaN or inf
-    if not np.all(np.isfinite(time_col)):
-        logging.error("Non-finite time detected; abandon hope for %s", name)
-        return None, None
     # Sanity check: is the table sorted by time?
     for a, b in zip(time_col[:-1], time_col[1:]):
         if a >= b:
@@ -98,10 +94,14 @@ def make_label_column(length, start, stop):
     out[start:stop] = 1
     return out
 
-def strip_cols(fits_table, i_start, i_stop, transit_col, eb_col):
-    meatadata = dictify(fits_table.header)
+def strip_cols(fits_table, i_start, i_stop, transit_col, eb_col, name="Unknown"):
+    metadata = dictify(fits_table.header)
     columns = [fits_table.data["TIME"], fits_table.data["SAP_FLUX"], transit_col, eb_col]
     stripped = [c[i_start:i_stop] for c in columns]
+    # Sanity check: no time value is NaN or inf
+    if not np.all(np.isfinite(stripped[0])):
+        logging.warning("Non-finite time detected in clip for %s", name)
+        return None
     t = table.Table(stripped,
         names=("TIME", "SAP_FLUX", "IN_TRANSIT", "EB_injection"),
         dtype=("f8", "f8", "i4", "i4"), meta=metadata)
@@ -135,20 +135,20 @@ def gather_data(filename, injected_table, injected_table_index):
         i_transit_start, i_transit_stop = strip_rows(time_col, transit_start, transit_stop, name)
         # Extract information of whether an eclipsing binary is being simulated
         is_eb = injected_table["EB_injection"][injected_i]
-        zeros = np.zeros(len(time))
+        zeros = np.zeros(len(time_col))
         if is_eb:
-            transit_col = make_label_column(len(time), i_transit_start, i_transit_stop)
-            eb_col = zeros
-        else:
             transit_col = zeros
-            eb_col = make_label_column(len(time), i_transit_start, i_transit_stop)
+            eb_col = make_label_column(len(time_col), i_transit_start, i_transit_stop)
+        else:
+            transit_col = make_label_column(len(time_col), i_transit_start, i_transit_stop)
+            eb_col = zeros
         # Only preserve the TIME and SAP_FLUX columns of the light curve.
         # Also add tag for whether the mid transit point has passed.
-        t = strip_cols(hdulist[1], i_start, i_stop, transit_col, eb_col)
+        t = strip_cols(hdulist[1], i_start, i_stop, transit_col, eb_col, name)
         if i_neg_start is None or is_eb:
             neg_t = None
         else:
-            neg_t = strip_cols(hdulist[1], i_neg_start, i_neg_stop, zeros, zeros)
+            neg_t = strip_cols(hdulist[1], i_neg_start, i_neg_stop, zeros, zeros, name)
     return t, neg_t
 
 def main():
