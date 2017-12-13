@@ -2,6 +2,7 @@
 
 from astropy import table
 from astropy.io import fits, ascii
+import collections
 import logging
 import numpy as np
 from os import path
@@ -27,7 +28,7 @@ def dictify(fits_header):
     This is necessary because undefined cards can't be serialized and need to
     be turned in to Nones.
     """
-    out = {}
+    out = collections.OrderedDict()
     for k, v in fits_header.items():
         if type(v) is not fits.card.Undefined:
             out[k] = v
@@ -92,23 +93,17 @@ def strip_rows_negative(time_col, time_start, time_stop, name="Unknown"):
         return None, None
     return strip_rows(time_col, neg_start, neg_stop, name)
 
-def make_label_column(length, start, stop, col_name):
+def make_label_column(length, start, stop):
     out = np.zeros(length)
     out[start:stop] = 1
-    return table.Column(data=out, name=col_name)
+    return out
 
-def strip_cols(fits_table, transit_start, transit_stop, is_eb, dur):
-    metadata = dictify(fits_table.header)
-    data_rows = []
-    start = mid_transit - dur / 2
-    stop = mid_transit + dur / 2
-    metadata["EB_injection"] = is_eb
-    for r in fits_rows:
-        # in_transit is 0 if outside transit and 1 if inside transit.
-        in_transit = int((start <= r["TIME"]) and (r["TIME"] <= stop))
-        eb_injection = int(is_eb and in_transit)
-        data_rows.append((r["TIME"], r["SAP_FLUX"], in_transit, eb_injection))
-    t = table.Table(rows=data_rows, names=("TIME", "SAP_FLUX", "IN_TRANSIT", "EB_injection"),
+def strip_cols(fits_table, i_start, i_stop, transit_col, eb_col):
+    meatadata = dictify(fits_table.header)
+    columns = [fits_table.data["TIME"], fits_table.data["SAP_FLUX"], transit_col, eb_col]
+    stripped = [c[i_start:i_stop] for c in columns]
+    t = table.Table(stripped,
+        names=("TIME", "SAP_FLUX", "IN_TRANSIT", "EB_injection"),
         dtype=("f8", "f8", "i4", "i4"), meta=metadata)
     return t
 
@@ -140,19 +135,20 @@ def gather_data(filename, injected_table, injected_table_index):
         i_transit_start, i_transit_stop = strip_rows(time_col, transit_start, transit_stop, name)
         # Extract information of whether an eclipsing binary is being simulated
         is_eb = injected_table["EB_injection"][injected_i]
+        zeros = np.zeros(len(time))
         if is_eb:
-            transit_col = make_label_column(len(time), i_transit_start, i_transit_stop, "IN_TRANSIT")
-            eb_col = table.Column(data=np.zeros(len(time)), name="EB_injection")
+            transit_col = make_label_column(len(time), i_transit_start, i_transit_stop)
+            eb_col = zeros
         else:
-            transit_col = table.Column(data=np.zeros(len(time)), name="IN_TRANSIT")
-            eb_col = make_label_column(len(time), i_transit_start, i_transit_stop, "EB_injection")
+            transit_col = zeros
+            eb_col = make_label_column(len(time), i_transit_start, i_transit_stop)
         # Only preserve the TIME and SAP_FLUX columns of the light curve.
         # Also add tag for whether the mid transit point has passed.
-        t = strip_cols(rows, dictify(hdulist[1].header), mid_transit, is_eb, dur)
+        t = strip_cols(hdulist[1], i_start, i_stop, transit_col, eb_col)
         if i_neg_start is None or is_eb:
             neg_t = None
         else:
-            neg_t = strip_cols(neg_rows, dictify(hdulist[1].header), mid_transit, 0, dur)
+            neg_t = strip_cols(hdulist[1], i_neg_start, i_neg_stop, zeros, zeros)
     return t, neg_t
 
 def main():
