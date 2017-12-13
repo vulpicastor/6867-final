@@ -3,6 +3,7 @@
 from astropy import table
 from astropy.io import fits, ascii
 import logging
+import numpy as np
 from os import path
 import random
 import sys
@@ -17,8 +18,8 @@ RANDOMIZE_BOUND = True
 BOUND_TOL = 6. / 24  # day; this is equivalent to 12 long cadences.
 BOUND_TOL_UPPER = 1.  # day
 BOUND_TOL_LOWER = 3./24  # day
-NEG_UPPER = 1.  # day; upper bound for time span of negative samples.
-NEG_LOWER = 3. / 24  # day; lower bound for time span of negative samples.
+NEG_UPPER = 2.  # day; upper bound for time span of negative samples.
+NEG_LOWER = 8. / 24  # day; lower bound for time span of negative samples.
 
 def dictify(fits_header):
     """-> dictionary representation of the FITS header.
@@ -42,10 +43,10 @@ def find_time_range(table_start, table_stop, epoch, period, dur, name="Unknown")
     half_width = dur / 2.
     transit_start = mid_transit - half_width
     transit_stop = mid_transit + half_width
-    # literally the transit don't exist in the data.
-    if table_start >= transit_stop or table_stop <= transit_start:
-        logging.error("Light curve range contains no transit for %s!", name)
-        return None, None, None, None
+    logging.info("The table start and stop period for %s is %s, %s", name, table_start, table_stop)
+    logging.info("The transit start and stop period for %s is %s, %s", name, transit_start, transit_stop)
+    if table_start >= transit_start or transit_stop >= table_stop:
+        logging.error("Transit outside light curve range for %s!", name)
     # Sanity checking.
     if RANDOMIZE_BOUND:
         # For LSTM, padding should be randomized in order to prevent overfitting based on
@@ -57,40 +58,47 @@ def find_time_range(table_start, table_stop, epoch, period, dur, name="Unknown")
         start = transit_start - BOUND_TOL
         stop = transit_stop - BOUND_TOL
     # Check that transit is not clipped by data boundary
-    if table_start >= start or table_stop <= stop:
-        logging.error("Transit partially outside light curve range for %s!", name)
+    if table_start >= start or stop >= table_stop:
+        logging.error("Transit too close to light curve broundary for %s!", name)
         return None, None, None, None
     logging.info("The start and stop period for {} is {}, {}".format(name, start, stop))
-    return start, stop, mid_transit, dur
+    return start, stop, transit_start, transit_stop
 
-def strip_rows(fits_table, t_start, t_stop):
-    rows = []
-    header, data = fits_table.header, fits_table.data
-    for r in data:
-        if t_start <= r["TIME"] and r["TIME"] <= t_stop:
-            rows.append(r)
-    return rows
+def strip_rows(time_col, time_start, time_stop, name="Unknown"):
+    # Sanity check: no time value is NaN or inf
+    if not np.all(np.isfinite(time_col)):
+        logging.error("Non-finite time detected; abandon hope for %s", name)
+        return None, None
+    # Sanity check: is the table sorted by time?
+    for a, b in zip(time_col[:-1], time_col[1:]):
+        if a >= b:
+            logging.error("Time flew backwards or stood still in %s", name)
+            return None, None
+    index_start = np.searchsorted(time_col, time_start)
+    index_stop = np.searchsorted(time_col, time_stop, side="right")
+    return index_start, index_stop
 
-def strip_rows_negative(fits_table, t_start, t_stop):
-    header, data = fits_table.header, fits_table.data
-    # t_start, t_stop = header["TSTART"], header["TSTOP"]
-    dur = random.uniform(NEG_LOWER, NEG_UPPER)  # Choose a duration for the negative sample
-    # Randomly find a start and stop time that does not overlap with interval
+def strip_rows_negative(time_col, time_start, time_stop, name="Unknown"):
+    # Choose a duration for the negative sample.
+    dur = random.uniform(NEG_LOWER, NEG_UPPER)
+    # Randomly find a start and stop time that does not overlap with interval.
     for i in range(100):
-        i_start = random.choice(data["TIME"])
-        i_stop = i_start + dur
-        if not (((t_start <= i_start) and (i_start <= t_stop)) or ((t_start <= i_stop) and (i_stop <= t_stop))):
+        neg_start = random.choice(time_col)
+        neg_stop = neg_start + dur
+        if not ((neg_start <= time_stop) and (time_start <= neg_stop)):
             break
     else:
-        logging.error("Cannot find a negative sample!")
-        return None
-    rows = []
-    for r in data:
-        if i_start <= r["TIME"] and r["TIME"] <= i_stop:
-            rows.append(r)
-    return rows
+        logging.error("Cannot find a negative sample in %s", name)
+        return None, None
+    return strip_rows(time_col, neg_start, neg_stop, name)
 
-def strip_cols(fits_rows, metadata, mid_transit, is_eb, dur):
+def make_label_column(length, start, stop, col_name):
+    out = np.zeros(length)
+    out[start:stop] = 1
+    return table.Column(data=out, name=col_name)
+
+def strip_cols(fits_table, transit_start, transit_stop, is_eb, dur):
+    metadata = dictify(fits_table.header)
     data_rows = []
     start = mid_transit - dur / 2
     stop = mid_transit + dur / 2
@@ -115,21 +123,33 @@ def gather_data(filename, injected_table, injected_table_index):
         dur = injected_table["i_dur"][injected_i] / 24.  # hour
         table_start = hdulist[1].header["TSTART"]
         table_stop = hdulist[1].header["TSTOP"]
+        name = hdulist[1].header["OBJECT"]
         # Find when the transit starts and stops in the FITS file.
-        start, stop, mid_transit, dur = find_time_range(table_start, table_stop, epoch, period, dur, name=hdulist[1].header["OBJECT"])
+        start, stop, transit_start, transit_stop = find_time_range(table_start, table_stop, epoch, period, dur, name)
         # When find_time_range fails, you know you are fucked.
         if start is None:
             return None, None
+        time_col = hdulist[1].data["TIME"]
         # Strip out the rows that are actually transts.
-        rows = strip_rows(hdulist[1], start, stop)
+        i_start, i_stop = strip_rows(time_col, start, stop, name)
+        if i_start is None:
+            return None, None
         # Also generate the negative samples
-        neg_rows = strip_rows_negative(hdulist[1], start, stop)
+        i_neg_start, i_neg_stop = strip_rows_negative(time_col, start, stop, name)
+        # Find transit start and stop indices
+        i_transit_start, i_transit_stop = strip_rows(time_col, transit_start, transit_stop, name)
         # Extract information of whether an eclipsing binary is being simulated
         is_eb = injected_table["EB_injection"][injected_i]
+        if is_eb:
+            transit_col = make_label_column(len(time), i_transit_start, i_transit_stop, "IN_TRANSIT")
+            eb_col = table.Column(data=np.zeros(len(time)), name="EB_injection")
+        else:
+            transit_col = table.Column(data=np.zeros(len(time)), name="IN_TRANSIT")
+            eb_col = make_label_column(len(time), i_transit_start, i_transit_stop, "EB_injection")
         # Only preserve the TIME and SAP_FLUX columns of the light curve.
         # Also add tag for whether the mid transit point has passed.
         t = strip_cols(rows, dictify(hdulist[1].header), mid_transit, is_eb, dur)
-        if neg_rows is None or is_eb:
+        if i_neg_start is None or is_eb:
             neg_t = None
         else:
             neg_t = strip_cols(neg_rows, dictify(hdulist[1].header), mid_transit, 0, dur)
@@ -147,8 +167,8 @@ def main():
             filename = path.abspath(i)
             # Example of an okay light curve:
             # "/mnt/data/INJ1/kplr011183555-2011271113734_INJECTED-inj1_llc.fits.gz"
-            t, neg_t = gather_data(filename, injected, index)
             root = path.basename(filename).split(".")[0]
+            t, neg_t = gather_data(filename, injected, index)
             if t is not None:
                 ascii.write(t, root + "_quicklook.ecsv", format='ecsv')
             if neg_t is not None:
